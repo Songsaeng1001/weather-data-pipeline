@@ -1,6 +1,7 @@
 import sqlite3
 from pathlib import Path
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -55,7 +56,16 @@ st.metric(
 )
 
 st.subheader("Hourly temperature (°C)")
-st.line_chart(filtered.pivot(index="forecast_time", columns="city", values="temperature_c"))
+temp_chart = (
+    alt.Chart(filtered)
+    .mark_line()
+    .encode(
+        x=alt.X("forecast_time:T", title="Time"),
+        y=alt.Y("temperature_c:Q", title="°C", scale=alt.Scale(zero=False)),
+        color=alt.Color("city:N", title="City"),
+    )
+)
+st.altair_chart(temp_chart)
 
 st.subheader("Hourly chance of rain (%)")
 st.line_chart(
