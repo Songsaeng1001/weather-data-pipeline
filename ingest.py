@@ -1,6 +1,11 @@
+import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
+import requests
 
+API_URL = "https://api.open-meteo.com/v1/forecast"
+HOURLY_VARS = "temperature_2m,precipitation_probability"
 DB_PATH = "weather.db"
 SCHEMA_PATH = "schema.sql"
 TIMEZONE = "Asia/Bangkok"
@@ -17,10 +22,10 @@ def get_connection():
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
-
 def init_schema(conn):
     schema = Path(SCHEMA_PATH).read_text()
     conn.executescript(schema)
+
 def upsert_cities(conn):
     for city in CITIES:
         conn.execute(
@@ -35,10 +40,53 @@ def upsert_cities(conn):
             (city["name"], city["lat"], city["lon"], TIMEZONE),
         )
     conn.commit()
+def fetch_forecast(city):
+    params = {
+        "latitude": city["lat"],
+        "longitude": city["lon"],
+        "hourly": HOURLY_VARS,
+        "forecast_days": 7,
+        "timezone": TIMEZONE,
+    }
+    response = requests.get(API_URL, params=params, timeout=10)
+    response.raise_for_status()
+    return response.json()
+
+
+def get_city_id(conn, name):
+    row = conn.execute(
+        "SELECT city_id FROM cities WHERE name = ?", (name,)
+    ).fetchone()
+    return row[0]
+
+def save_raw(conn, city_id, payload, fetched_at, fetched_hour):
+    conn.execute(
+        """
+        INSERT INTO raw_api_responses (city_id, fetched_hour, fetched_at, payload)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(city_id, fetched_hour) DO UPDATE SET
+            fetched_at = excluded.fetched_at,
+            payload    = excluded.payload
+        """,
+        (city_id, fetched_hour, fetched_at, json.dumps(payload)),
+    )
+
 def main():
     conn = get_connection()
     init_schema(conn)
     upsert_cities(conn)
+
+    run_time = datetime.now(timezone.utc)
+    fetched_at = run_time.isoformat(timespec="seconds")
+    fetched_hour = run_time.strftime("%Y-%m-%dT%H")
+
+    for city in CITIES:
+        data = fetch_forecast(city)
+        city_id = get_city_id(conn, city["name"])
+        save_raw(conn, city_id, data, fetched_at, fetched_hour)
+        conn.commit()
+        print(city["name"], "- saved raw,", len(data["hourly"]["time"]), "hours")
+
     conn.close()
 
 

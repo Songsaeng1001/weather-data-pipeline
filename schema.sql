@@ -11,8 +11,10 @@ CREATE TABLE IF NOT EXISTS cities (
 CREATE TABLE IF NOT EXISTS raw_api_responses (
     raw_id INTEGER PRIMARY KEY AUTOINCREMENT,
     city_id INTEGER NOT NULL REFERENCES cities(city_id),
+    fetched_hour TEXT NOT NULL,
     fetched_at TEXT NOT NULL,
-    payload TEXT NOT NULL
+    payload TEXT NOT NULL,
+    UNIQUE (city_id, fetched_hour)
 );
 
 CREATE TABLE IF NOT EXISTS hourly_forecast (
