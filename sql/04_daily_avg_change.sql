@@ -14,6 +14,6 @@ SELECT
     ROUND(
         avg_temp_c - LAG(avg_temp_c) OVER (PARTITION BY city ORDER BY day),
         1
-    ) AS change_from_prev_day_c
+    ) + 0.0 AS change_from_prev_day_c
 FROM daily
 ORDER BY city, day;
