@@ -5,6 +5,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
 import requests
 
 logging.basicConfig(
@@ -15,25 +16,33 @@ logger = logging.getLogger(__name__)
 
 API_URL = "https://api.open-meteo.com/v1/forecast"
 HOURLY_VARS = "temperature_2m,precipitation_probability"
+REQUEST_TIMEOUT = 10
+MAX_RETRIES = 3
+RETRY_BACKOFF_SECONDS = 2
+RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 DB_PATH = "weather.db"
 SCHEMA_PATH = "schema.sql"
 TIMEZONE = "Asia/Bangkok"
 
 CITIES = [
-    {"name": "Bangkok",    "lat": 13.7563, "lon": 100.5018},
+    {"name": "Bangkok", "lat": 13.7563, "lon": 100.5018},
     {"name": "Chiang Mai", "lat": 18.7883, "lon": 98.9853},
-    {"name": "Phuket",     "lat": 7.8804,  "lon": 98.3923},
-    {"name": "Khon Kaen",  "lat": 16.4322, "lon": 102.8236},
-    {"name": "Hat Yai",    "lat": 7.0086,  "lon": 100.4747},
+    {"name": "Phuket", "lat": 7.8804, "lon": 98.3923},
+    {"name": "Khon Kaen", "lat": 16.4322, "lon": 102.8236},
+    {"name": "Hat Yai", "lat": 7.0086, "lon": 100.4747},
 ]
+
+
 def get_connection():
     conn = sqlite3.connect(DB_PATH)
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
+
 def init_schema(conn):
     schema = Path(SCHEMA_PATH).read_text()
     conn.executescript(schema)
+
 
 def upsert_cities(conn):
     for city in CITIES:
@@ -49,6 +58,8 @@ def upsert_cities(conn):
             (city["name"], city["lat"], city["lon"], TIMEZONE),
         )
     conn.commit()
+
+
 def fetch_forecast(city):
     params = {
         "latitude": city["lat"],
@@ -57,16 +68,37 @@ def fetch_forecast(city):
         "forecast_days": 7,
         "timezone": TIMEZONE,
     }
-    response = requests.get(API_URL, params=params, timeout=10)
-    response.raise_for_status()
-    return response.json()
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = requests.get(API_URL, params=params, timeout=REQUEST_TIMEOUT)
+        except (requests.Timeout, requests.ConnectionError) as e:
+            error = e
+        else:
+            if response.status_code not in RETRYABLE_STATUS:
+                response.raise_for_status()
+                return response.json()
+            error = f"HTTP {response.status_code}"
+
+        if attempt < MAX_RETRIES:
+            wait = RETRY_BACKOFF_SECONDS * 2 ** (attempt - 1)
+            logger.warning(
+                "%s: attempt %d/%d failed (%s), retrying in %ds",
+                city["name"],
+                attempt,
+                MAX_RETRIES,
+                error,
+                wait,
+            )
+            time.sleep(wait)
+
+    raise RuntimeError(f"gave up after {MAX_RETRIES} attempts ({error})")
 
 
 def get_city_id(conn, name):
-    row = conn.execute(
-        "SELECT city_id FROM cities WHERE name = ?", (name,)
-    ).fetchone()
+    row = conn.execute("SELECT city_id FROM cities WHERE name = ?", (name,)).fetchone()
     return row[0]
+
 
 def save_raw(conn, city_id, payload, fetched_at, fetched_hour):
     conn.execute(
@@ -79,6 +111,8 @@ def save_raw(conn, city_id, payload, fetched_at, fetched_hour):
         """,
         (city_id, fetched_hour, fetched_at, json.dumps(payload)),
     )
+
+
 def transform(city_id, payload, fetched_at):
     hourly = payload["hourly"]
     rows = []
@@ -90,6 +124,7 @@ def transform(city_id, payload, fetched_at):
     ):
         rows.append((city_id, ts, temp, rain, fetched_at))
     return rows
+
 
 def load_forecast(conn, rows):
     conn.executemany(
@@ -105,13 +140,15 @@ def load_forecast(conn, rows):
         rows,
     )
 
+
 def delete_stale(conn, city_id, rows):
     earliest = min(row[1] for row in rows)
     conn.execute(
         "DELETE FROM hourly_forecast WHERE city_id = ? AND forecast_time < ?",
         (city_id, earliest),
     )
-    
+
+
 def main():
     start = time.perf_counter()
 
@@ -139,17 +176,20 @@ def main():
             succeeded.append(name)
             total_rows += len(rows)
             logger.info("%s: loaded %d rows", name, len(rows))
-        except Exception as e:
+        except Exception:
             conn.rollback()
             failed.append(name)
-            logger.error("%s: failed, rolled back (%s)", name, e)
+            logger.exception("%s: failed, rolled back", name)
 
     conn.close()
 
     elapsed = time.perf_counter() - start
     logger.info(
         "Done: %d/%d cities succeeded, %d rows loaded, %.2fs elapsed",
-        len(succeeded), len(CITIES), total_rows, elapsed,
+        len(succeeded),
+        len(CITIES),
+        total_rows,
+        elapsed,
     )
     if failed:
         logger.warning("Failed cities: %s", ", ".join(failed))
