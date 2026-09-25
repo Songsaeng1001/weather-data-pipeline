@@ -70,7 +70,39 @@ def save_raw(conn, city_id, payload, fetched_at, fetched_hour):
         """,
         (city_id, fetched_hour, fetched_at, json.dumps(payload)),
     )
+def transform(city_id, payload, fetched_at):
+    hourly = payload["hourly"]
+    rows = []
+    for time, temp, rain in zip(
+        hourly["time"],
+        hourly["temperature_2m"],
+        hourly["precipitation_probability"],
+        strict=True,
+    ):
+        rows.append((city_id, time, temp, rain, fetched_at))
+    return rows
 
+def load_forecast(conn, rows):
+    conn.executemany(
+        """
+        INSERT INTO hourly_forecast
+            (city_id, forecast_time, temperature_c, precipitation_probability_pct, fetched_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(city_id, forecast_time) DO UPDATE SET
+            temperature_c                 = excluded.temperature_c,
+            precipitation_probability_pct = excluded.precipitation_probability_pct,
+            fetched_at                    = excluded.fetched_at
+        """,
+        rows,
+    )
+
+def delete_stale(conn, city_id, rows):
+    earliest = min(row[1] for row in rows)
+    conn.execute(
+        "DELETE FROM hourly_forecast WHERE city_id = ? AND forecast_time < ?",
+        (city_id, earliest),
+    )
+    
 def main():
     conn = get_connection()
     init_schema(conn)
@@ -84,8 +116,11 @@ def main():
         data = fetch_forecast(city)
         city_id = get_city_id(conn, city["name"])
         save_raw(conn, city_id, data, fetched_at, fetched_hour)
+        rows = transform(city_id, data, fetched_at)
+        load_forecast(conn, rows)
+        delete_stale(conn, city_id, rows)
         conn.commit()
-        print(city["name"], "- saved raw,", len(data["hourly"]["time"]), "hours")
+        print(city["name"], "- loaded", len(rows), "rows")
 
     conn.close()
 
