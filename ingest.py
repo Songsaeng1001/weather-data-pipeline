@@ -1,8 +1,17 @@
 import json
+import logging
 import sqlite3
+import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 import requests
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-7s %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 API_URL = "https://api.open-meteo.com/v1/forecast"
 HOURLY_VARS = "temperature_2m,precipitation_probability"
@@ -73,13 +82,13 @@ def save_raw(conn, city_id, payload, fetched_at, fetched_hour):
 def transform(city_id, payload, fetched_at):
     hourly = payload["hourly"]
     rows = []
-    for time, temp, rain in zip(
+    for ts, temp, rain in zip(
         hourly["time"],
         hourly["temperature_2m"],
         hourly["precipitation_probability"],
         strict=True,
     ):
-        rows.append((city_id, time, temp, rain, fetched_at))
+        rows.append((city_id, ts, temp, rain, fetched_at))
     return rows
 
 def load_forecast(conn, rows):
@@ -104,6 +113,8 @@ def delete_stale(conn, city_id, rows):
     )
     
 def main():
+    start = time.perf_counter()
+
     conn = get_connection()
     init_schema(conn)
     upsert_cities(conn)
@@ -112,17 +123,37 @@ def main():
     fetched_at = run_time.isoformat(timespec="seconds")
     fetched_hour = run_time.strftime("%Y-%m-%dT%H")
 
+    succeeded, failed = [], []
+    total_rows = 0
+
     for city in CITIES:
-        data = fetch_forecast(city)
-        city_id = get_city_id(conn, city["name"])
-        save_raw(conn, city_id, data, fetched_at, fetched_hour)
-        rows = transform(city_id, data, fetched_at)
-        load_forecast(conn, rows)
-        delete_stale(conn, city_id, rows)
-        conn.commit()
-        print(city["name"], "- loaded", len(rows), "rows")
+        name = city["name"]
+        try:
+            data = fetch_forecast(city)
+            city_id = get_city_id(conn, name)
+            save_raw(conn, city_id, data, fetched_at, fetched_hour)
+            rows = transform(city_id, data, fetched_at)
+            load_forecast(conn, rows)
+            delete_stale(conn, city_id, rows)
+            conn.commit()
+            succeeded.append(name)
+            total_rows += len(rows)
+            logger.info("%s: loaded %d rows", name, len(rows))
+        except Exception as e:
+            conn.rollback()
+            failed.append(name)
+            logger.error("%s: failed, rolled back (%s)", name, e)
 
     conn.close()
+
+    elapsed = time.perf_counter() - start
+    logger.info(
+        "Done: %d/%d cities succeeded, %d rows loaded, %.2fs elapsed",
+        len(succeeded), len(CITIES), total_rows, elapsed,
+    )
+    if failed:
+        logger.warning("Failed cities: %s", ", ".join(failed))
+        sys.exit(1)
 
 
 if __name__ == "__main__":
