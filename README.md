@@ -24,6 +24,15 @@ Run a single SQL query:
 sqlite3 -header -column weather.db < sql/01_daily_temperature_stats.sql
 ```
 
+Or run everything with Docker (fetch, report and dashboard in one step):
+
+```bash
+docker build -t weather-pipeline .
+docker run --rm -p 8501:8501 weather-pipeline
+```
+
+Then open http://localhost:8501.
+
 ## Project structure
 
 ```
@@ -34,6 +43,7 @@ results/       Output of each query
 report.py      Renders the query results to reports/weather_report.md
 app.py         Streamlit dashboard (reads from SQLite, never calls the API)
 docs/          Dashboard screenshot
+Dockerfile     Runs ingest → report → dashboard in a container
 ```
 
 ## Results
@@ -63,10 +73,10 @@ docs/          Dashboard screenshot
 - Units: the response reports units in `hourly_units` (°C, %). I use the API defaults and put the unit in each column name. A production version should check `hourly_units` on every run so a unit change fails loudly.
 - Gaps: arrays are zipped with `strict=True`, so mismatched lengths fail loudly instead of silently dropping hours. The API also snaps coordinates to its model grid, so I keep the requested coordinates in `cities`.
 
-**Running hourly, all year.** Schedule with Airflow (or cron) and use the run's hour as the raw partition key. Move raw responses to object storage partitioned by date and hour, switch to PostgreSQL, validate config and API responses, alert on failed runs, and set a retention policy for raw data.
+**Running hourly, all year.** Run the existing Docker image on a schedule with Airflow (or cron), using the run's hour as the raw partition key. Move raw responses to object storage partitioned by date and hour, switch to PostgreSQL, validate config and API responses, alert on failed runs, and set a retention policy for raw data.
 
 **Insights** (run of 26 Sep 2026).
 - Bangkok warms through the week: daily average rises from 25.0 °C to 28.0 °C while its peak rain probability falls from 100% to around 70%.
 - Chiang Mai's coolest day (29 Sep, max only 25.2 °C) coincides with a 95% rain peak as early as 11:00. Across cities, rain usually peaks between 13:00 and 18:00.
 
-**AI usage.** I used Claude as a tutor throughout. It explained each concept step by step and drafted most of the code (`ingest.py`, `report.py`, `app.py`, SQL queries 1, 3 and 4) and this README. I ran and verified every step myself and fixed the errors I hit along the way (typos in parameters and column names, a broken logging format, a query missing `GROUP BY`). I wrote the first draft of SQL query 2 and corrected it after review. Design decisions were discussed with Claude; for example, I chose to store raw responses once per city per hour after comparing it with an append-only log. I can walk through any line and explain why it is there.
+**AI usage.** I used Claude as a tutor throughout. It explained each concept step by step and drafted most of the code (`ingest.py`, `report.py`, `app.py`, the `Dockerfile`, SQL queries 1, 3 and 4) and this README. I ran and verified every step myself and fixed the errors I hit along the way (typos in parameters and column names, a broken logging format, a query missing `GROUP BY`). I wrote the first draft of SQL query 2 and corrected it after review. Design decisions were discussed with Claude; for example, I chose to store raw responses once per city per hour after comparing it with an append-only log. I can walk through any line and explain why it is there.
